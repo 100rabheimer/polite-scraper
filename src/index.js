@@ -10,14 +10,10 @@ const cheerio = require("cheerio");
 const START_URL =
   "https://books.toscrape.com/catalogue/page-1.html";
 
-const CACHE_DIR = path.join(
-  __dirname,
-  "..",
-  "cache"
-);
+const CACHE_DIR = path.join(__dirname, "..", "cache");
 
 const USER_AGENT =
-  "PoliteScraper/1.0 (educational project)";
+  "PoliteScraper/1.0 (educational FlyRank backend project)";
 
 const REQUEST_TIMEOUT_MS = 10000;
 const REQUEST_DELAY_MS = 500;
@@ -26,22 +22,15 @@ const MAX_CATALOGUE_PAGES = 3;
 
 
 // ==================================================
-// SLEEP
+// HELPERS
 // ==================================================
 
 function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 
-// ==================================================
-// CACHE FILE PATH
-// ==================================================
-
 function getCachePath(url) {
-
   const parsedUrl = new URL(url);
 
   let safeName = parsedUrl.pathname
@@ -52,198 +41,333 @@ function getCachePath(url) {
     safeName = "index";
   }
 
-  return path.join(
-    CACHE_DIR,
-    `${safeName}.html`
-  );
+  return path.join(CACHE_DIR, `${safeName}.html`);
 }
 
 
 // ==================================================
-// FETCH PAGE
+// FETCH + CACHE
 // ==================================================
 
 async function fetchPage(url) {
-
-  await fs.mkdir(
-    CACHE_DIR,
-    { recursive: true }
-  );
+  await fs.mkdir(CACHE_DIR, { recursive: true });
 
   const cachePath = getCachePath(url);
 
-
-  // ----------------------------------------------
-  // CHECK CACHE FIRST
-  // ----------------------------------------------
+  // ---------------- CACHE ----------------
 
   try {
+    const html = await fs.readFile(cachePath, "utf8");
 
-    const cachedHtml =
-      await fs.readFile(
-        cachePath,
-        "utf8"
-      );
+    console.log(`[CACHE HIT] ${url}`);
 
-    console.log(
-      `[CACHE HIT] ${url}`
-    );
-
-    return cachedHtml;
-
+    return {
+      html,
+      fetchedAt: new Date().toISOString(),
+      fromCache: true,
+    };
   } catch {
-
-    // Cache does not exist.
-    // Continue with real HTTP request.
-
+    // Cache miss → continue to network request
   }
 
 
-  // ----------------------------------------------
-  // REAL NETWORK REQUEST
-  // ----------------------------------------------
+  // ---------------- NETWORK ----------------
 
-  console.log(
-    `[FETCH] ${url}`
-  );
+  console.log(`[FETCH] ${url}`);
 
-  const controller =
-    new AbortController();
+  const controller = new AbortController();
 
   const timeout = setTimeout(
     () => controller.abort(),
     REQUEST_TIMEOUT_MS
   );
 
-
   try {
-
-    const response = await fetch(
-      url,
-      {
-        headers: {
-          "User-Agent": USER_AGENT,
-        },
-
-        signal: controller.signal,
-      }
-    );
-
-
-    // ------------------------------------------
-    // STATUS CHECK
-    // ------------------------------------------
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": USER_AGENT,
+      },
+      signal: controller.signal,
+    });
 
     if (!response.ok) {
-
       throw new Error(
         `HTTP ${response.status} ${response.statusText}`
       );
-
     }
 
+    const html = await response.text();
 
-    const html =
-      await response.text();
+    await fs.writeFile(cachePath, html, "utf8");
 
+    console.log(`[CACHED] ${url}`);
 
-    // ------------------------------------------
-    // SAVE RESPONSE TO CACHE
-    // ------------------------------------------
-
-    await fs.writeFile(
-      cachePath,
+    return {
       html,
-      "utf8"
-    );
-
-
-    console.log(
-      `[CACHED] ${cachePath}`
-    );
-
-
-    return html;
-
+      fetchedAt: new Date().toISOString(),
+      fromCache: false,
+    };
   } finally {
-
     clearTimeout(timeout);
-
   }
 }
 
 
 // ==================================================
-// PARSE CATALOGUE PAGE
+// CATALOGUE PARSER
 // ==================================================
 
-function parseCatalogue(
-  html,
-  pageUrl
-) {
-
+function parseCatalogue(html, pageUrl) {
   const $ = cheerio.load(html);
 
-  const bookUrls = [];
+  const books = [];
 
+  $("article.product_pod h3 a").each((_, element) => {
+    const href = $(element).attr("href");
 
-  // ----------------------------------------------
-  // FIND BOOK LINKS
-  // ----------------------------------------------
-
-  $(
-    "article.product_pod h3 a"
-  ).each(
-    (_, element) => {
-
-      const href =
-        $(element).attr("href");
-
-
-      if (!href) {
-        return;
-      }
-
-
-      // IMPORTANT:
-      // Never concatenate URL strings manually.
-      // Let the URL class resolve relative URLs.
-
-      const absoluteUrl =
-        new URL(
-          href,
-          pageUrl
-        ).href;
-
-
-      bookUrls.push(
-        absoluteUrl
-      );
-
+    if (!href) {
+      return;
     }
-  );
+
+    books.push({
+      product_url: new URL(href, pageUrl).href,
+      source_page: pageUrl,
+    });
+  });
 
 
-  // ----------------------------------------------
-  // FIND NEXT PAGE
-  // ----------------------------------------------
+  const nextHref = $("li.next a").attr("href");
 
-  const nextHref =
-    $("li.next a").attr("href");
-
-
-  const nextUrl =
-    nextHref
-      ? new URL(
-          nextHref,
-          pageUrl
-        ).href
-      : null;
+  const nextUrl = nextHref
+    ? new URL(nextHref, pageUrl).href
+    : null;
 
 
   return {
-    bookUrls,
+    books,
     nextUrl,
+  };
+}
+
+
+// ==================================================
+// DISCOVER BOOKS
+// ==================================================
+
+async function discoverBooks() {
+  let currentPageUrl = START_URL;
+
+  let cataloguePages = 0;
+
+  const discoveredBooks = [];
+
+
+  while (
+    currentPageUrl &&
+    cataloguePages < MAX_CATALOGUE_PAGES
+  ) {
+    console.log(
+      `\nCatalogue page ${cataloguePages + 1}`
+    );
+
+    const result = await fetchPage(currentPageUrl);
+
+    const { books, nextUrl } = parseCatalogue(
+      result.html,
+      currentPageUrl
+    );
+
+    discoveredBooks.push(...books);
+
+    cataloguePages++;
+
+    console.log(`books_found=${books.length}`);
+
+    currentPageUrl = nextUrl;
+
+
+    // Delay only if another catalogue page may require
+    // a real request.
+    if (
+      currentPageUrl &&
+      cataloguePages < MAX_CATALOGUE_PAGES
+    ) {
+      await sleep(REQUEST_DELAY_MS);
+    }
+  }
+
+
+  // Remove duplicate canonical product URLs
+
+  const uniqueMap = new Map();
+
+  for (const book of discoveredBooks) {
+    if (!uniqueMap.has(book.product_url)) {
+      uniqueMap.set(book.product_url, book);
+    }
+  }
+
+
+  return {
+    cataloguePages,
+    discovered: discoveredBooks.length,
+    books: [...uniqueMap.values()],
+  };
+}
+
+
+// ==================================================
+// BOOK DETAIL PARSER
+// ==================================================
+
+function parseBookPage(
+  html,
+  productUrl,
+  sourcePage,
+  fetchedAt
+) {
+  const $ = cheerio.load(html);
+
+
+  // Product area only
+
+  const productMain = $(".product_main");
+
+
+  // ---------------- TITLE ----------------
+
+  const title =
+    productMain.find("h1").first().text().trim();
+
+
+  // ---------------- PRICE ----------------
+
+  const priceText =
+    productMain
+      .find(".price_color")
+      .first()
+      .text()
+      .trim();
+
+
+  // ---------------- AVAILABILITY ----------------
+
+  const availabilityText =
+    productMain
+      .find(".availability")
+      .first()
+      .text()
+      .replace(/\s+/g, " ")
+      .trim();
+
+
+  // ---------------- RATING ----------------
+
+  const ratingElement =
+    productMain.find(".star-rating").first();
+
+  const ratingClasses =
+    ratingElement.attr("class") || "";
+
+  const ratingText =
+    ratingClasses
+      .split(/\s+/)
+      .find(
+        (className) =>
+          className !== "star-rating"
+      ) || null;
+
+
+  // ---------------- DESCRIPTION ----------------
+
+  const descriptionHeading =
+    $("#product_description");
+
+  let description = null;
+
+  if (descriptionHeading.length > 0) {
+    const descriptionParagraph =
+      descriptionHeading.next("p");
+
+    if (descriptionParagraph.length > 0) {
+      const text = descriptionParagraph
+        .text()
+        .replace(/\s+/g, " ")
+        .trim();
+
+      description =
+        text.length > 0 ? text : null;
+    }
+  }
+
+
+  // ==================================================
+  // RAW RECORD
+  // ==================================================
+
+  return {
+    title,
+    product_url: productUrl,
+    price_text: priceText,
+    availability_text: availabilityText,
+    rating_text: ratingText,
+    description,
+    source_page: sourcePage,
+    fetched_at: fetchedAt,
+  };
+}
+
+
+// ==================================================
+// EXTRACT ALL DETAILS
+// ==================================================
+
+async function extractBookDetails(books) {
+  const rawRecords = [];
+
+  let detailPages = 0;
+
+
+  for (let i = 0; i < books.length; i++) {
+    const book = books[i];
+
+    console.log(
+      `\nBook ${i + 1}/${books.length}`
+    );
+
+    const result = await fetchPage(
+      book.product_url
+    );
+
+
+    const record = parseBookPage(
+      result.html,
+      book.product_url,
+      book.source_page,
+      result.fetchedAt
+    );
+
+
+    rawRecords.push(record);
+
+    detailPages++;
+
+
+    // Only wait after a real HTTP request.
+    // Cache hits never leave the computer.
+
+    if (
+      !result.fromCache &&
+      i < books.length - 1
+    ) {
+      await sleep(REQUEST_DELAY_MS);
+    }
+  }
+
+
+  return {
+    rawRecords,
+    detailPages,
   };
 }
 
@@ -253,178 +377,81 @@ function parseCatalogue(
 // ==================================================
 
 async function main() {
+  console.log("\n📚 The Polite Scraper");
+  console.log("================================");
 
   console.log(
-    "\n📚 The Polite Scraper"
+    "Stage 3: Extract raw book records"
   );
-
-  console.log(
-    "================================"
-  );
-
-  console.log(
-    "Stage 2: Discover catalogue pages"
-  );
-
-
-  let currentPageUrl =
-    START_URL;
-
-  let cataloguePages = 0;
-
-  const discoveredUrls = [];
-
-
-  // ----------------------------------------------
-  // FOLLOW FIRST THREE CATALOGUE PAGES
-  // ----------------------------------------------
-
-  while (
-    currentPageUrl &&
-    cataloguePages <
-      MAX_CATALOGUE_PAGES
-  ) {
-
-    console.log(
-      `\nCatalogue page ${
-        cataloguePages + 1
-      }`
-    );
-
-
-    // ------------------------------------------
-    // FETCH / READ CACHE
-    // ------------------------------------------
-
-    const html =
-      await fetchPage(
-        currentPageUrl
-      );
-
-
-    // ------------------------------------------
-    // PARSE PAGE
-    // ------------------------------------------
-
-    const {
-      bookUrls,
-      nextUrl,
-    } = parseCatalogue(
-      html,
-      currentPageUrl
-    );
-
-
-    cataloguePages++;
-
-
-    // ------------------------------------------
-    // COLLECT DISCOVERED BOOKS
-    // ------------------------------------------
-
-    discoveredUrls.push(
-      ...bookUrls
-    );
-
-
-    console.log(
-      `books_found=${bookUrls.length}`
-    );
-
-
-    // Follow site's own Next link.
-
-    currentPageUrl =
-      nextUrl;
-
-
-    // ------------------------------------------
-    // POLITE DELAY
-    // ------------------------------------------
-
-    if (
-      currentPageUrl &&
-      cataloguePages <
-        MAX_CATALOGUE_PAGES
-    ) {
-
-      await sleep(
-        REQUEST_DELAY_MS
-      );
-
-    }
-
-  }
 
 
   // ==================================================
-  // REMOVE DUPLICATES
+  // DISCOVERY
   // ==================================================
 
-  const uniqueUrls = [
-    ...new Set(
-      discoveredUrls
-    ),
-  ];
+  const discovery = await discoverBooks();
+
+
+  console.log("\n================================");
+  console.log("DISCOVERY");
+  console.log("================================");
+
+  console.log(
+    `catalogue_pages=${discovery.cataloguePages}`
+  );
+
+  console.log(
+    `discovered=${discovery.discovered}`
+  );
+
+  console.log(
+    `unique_urls=${discovery.books.length}`
+  );
 
 
   // ==================================================
-  // CHECKPOINT
+  // DETAIL EXTRACTION
   // ==================================================
 
-  console.log(
-    "\n================================"
-  );
-
-  console.log(
-    "STAGE 2 CHECKPOINT"
-  );
-
-  console.log(
-    "================================"
-  );
-
-  console.log(
-    `catalogue_pages=${cataloguePages}`
-  );
-
-  console.log(
-    `discovered=${discoveredUrls.length}`
-  );
-
-  console.log(
-    `unique_urls=${uniqueUrls.length}`
+  const {
+    rawRecords,
+    detailPages,
+  } = await extractBookDetails(
+    discovery.books
   );
 
 
-  // ----------------------------------------------
-  // OPTIONAL SAMPLE
-  // ----------------------------------------------
+  // ==================================================
+  // STAGE 3 CHECKPOINT
+  // ==================================================
+
+  console.log("\n================================");
+  console.log("STAGE 3 CHECKPOINT");
+  console.log("================================");
+
+  console.log(`detail_pages=${detailPages}`);
+
+  console.log("\nComplete raw record:\n");
 
   console.log(
-    "\nFirst discovered book:"
+    JSON.stringify(
+      rawRecords[0],
+      null,
+      2
+    )
   );
-
-  console.log(
-    uniqueUrls[0]
-  );
-
 }
 
 
 // ==================================================
-// START SCRAPER
+// START
 // ==================================================
 
-main().catch(
-  (error) => {
+main().catch((error) => {
+  console.error(
+    "\nScraper failed:",
+    error.message
+  );
 
-    console.error(
-      "\nScraper failed:",
-      error.message
-    );
-
-    process.exitCode = 1;
-
-  }
-);
+  process.exitCode = 1;
+});
