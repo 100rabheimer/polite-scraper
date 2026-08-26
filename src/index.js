@@ -1,6 +1,7 @@
 const fs = require("fs/promises");
 const path = require("path");
 const cheerio = require("cheerio");
+const { z } = require("zod");
 
 
 // ==================================================
@@ -10,15 +11,64 @@ const cheerio = require("cheerio");
 const START_URL =
   "https://books.toscrape.com/catalogue/page-1.html";
 
-const CACHE_DIR = path.join(__dirname, "..", "cache");
+const CACHE_DIR =
+  path.join(__dirname, "..", "cache");
+
+const OUTPUT_DIR =
+  path.join(__dirname, "..", "output");
+
+const BOOKS_FILE =
+  path.join(OUTPUT_DIR, "books.json");
+
+const ERRORS_FILE =
+  path.join(OUTPUT_DIR, "errors.json");
 
 const USER_AGENT =
   "PoliteScraper/1.0 (educational FlyRank backend project)";
 
 const REQUEST_TIMEOUT_MS = 10000;
 const REQUEST_DELAY_MS = 500;
-
 const MAX_CATALOGUE_PAGES = 3;
+
+
+// ==================================================
+// ZOD SCHEMA
+// ==================================================
+
+const BookSchema = z.object({
+  title: z.string().min(1),
+
+  product_url: z
+    .string()
+    .url()
+    .refine(
+      (url) => url.startsWith("https://"),
+      "product_url must use HTTPS"
+    ),
+
+  price_text: z.string().min(1),
+
+  price_gbp: z
+    .number()
+    .finite()
+    .nonnegative(),
+
+  availability_text: z.string().min(1),
+
+  rating_text: z.string().min(1),
+
+  description: z.string().nullable(),
+
+  source_page: z
+    .string()
+    .url()
+    .refine(
+      (url) => url.startsWith("https://"),
+      "source_page must use HTTPS"
+    ),
+
+  fetched_at: z.string().min(1),
+});
 
 
 // ==================================================
@@ -26,7 +76,9 @@ const MAX_CATALOGUE_PAGES = 3;
 // ==================================================
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) =>
+    setTimeout(resolve, ms)
+  );
 }
 
 
@@ -41,7 +93,10 @@ function getCachePath(url) {
     safeName = "index";
   }
 
-  return path.join(CACHE_DIR, `${safeName}.html`);
+  return path.join(
+    CACHE_DIR,
+    `${safeName}.html`
+  );
 }
 
 
@@ -50,14 +105,20 @@ function getCachePath(url) {
 // ==================================================
 
 async function fetchPage(url) {
-  await fs.mkdir(CACHE_DIR, { recursive: true });
+  await fs.mkdir(
+    CACHE_DIR,
+    { recursive: true }
+  );
 
   const cachePath = getCachePath(url);
 
   // ---------------- CACHE ----------------
 
   try {
-    const html = await fs.readFile(cachePath, "utf8");
+    const html = await fs.readFile(
+      cachePath,
+      "utf8"
+    );
 
     console.log(`[CACHE HIT] ${url}`);
 
@@ -67,7 +128,7 @@ async function fetchPage(url) {
       fromCache: true,
     };
   } catch {
-    // Cache miss → continue to network request
+    // Cache miss
   }
 
 
@@ -98,7 +159,11 @@ async function fetchPage(url) {
 
     const html = await response.text();
 
-    await fs.writeFile(cachePath, html, "utf8");
+    await fs.writeFile(
+      cachePath,
+      html,
+      "utf8"
+    );
 
     console.log(`[CACHED] ${url}`);
 
@@ -114,7 +179,7 @@ async function fetchPage(url) {
 
 
 // ==================================================
-// CATALOGUE PARSER
+// PARSE CATALOGUE
 // ==================================================
 
 function parseCatalogue(html, pageUrl) {
@@ -122,21 +187,25 @@ function parseCatalogue(html, pageUrl) {
 
   const books = [];
 
-  $("article.product_pod h3 a").each((_, element) => {
-    const href = $(element).attr("href");
+  $("article.product_pod h3 a").each(
+    (_, element) => {
+      const href =
+        $(element).attr("href");
 
-    if (!href) {
-      return;
+      if (!href) return;
+
+      books.push({
+        product_url:
+          new URL(href, pageUrl).href,
+
+        source_page: pageUrl,
+      });
     }
-
-    books.push({
-      product_url: new URL(href, pageUrl).href,
-      source_page: pageUrl,
-    });
-  });
+  );
 
 
-  const nextHref = $("li.next a").attr("href");
+  const nextHref =
+    $("li.next a").attr("href");
 
   const nextUrl = nextHref
     ? new URL(nextHref, pageUrl).href
@@ -151,7 +220,7 @@ function parseCatalogue(html, pageUrl) {
 
 
 // ==================================================
-// DISCOVER BOOKS
+// DISCOVER FIRST THREE PAGES
 // ==================================================
 
 async function discoverBooks() {
@@ -170,25 +239,27 @@ async function discoverBooks() {
       `\nCatalogue page ${cataloguePages + 1}`
     );
 
-    const result = await fetchPage(currentPageUrl);
+    const result =
+      await fetchPage(currentPageUrl);
 
-    const { books, nextUrl } = parseCatalogue(
-      result.html,
-      currentPageUrl
-    );
+    const { books, nextUrl } =
+      parseCatalogue(
+        result.html,
+        currentPageUrl
+      );
 
     discoveredBooks.push(...books);
 
     cataloguePages++;
 
-    console.log(`books_found=${books.length}`);
+    console.log(
+      `books_found=${books.length}`
+    );
 
     currentPageUrl = nextUrl;
 
-
-    // Delay only if another catalogue page may require
-    // a real request.
     if (
+      !result.fromCache &&
       currentPageUrl &&
       cataloguePages < MAX_CATALOGUE_PAGES
     ) {
@@ -197,27 +268,30 @@ async function discoverBooks() {
   }
 
 
-  // Remove duplicate canonical product URLs
+  // Canonical product URL = identity
 
-  const uniqueMap = new Map();
-
-  for (const book of discoveredBooks) {
-    if (!uniqueMap.has(book.product_url)) {
-      uniqueMap.set(book.product_url, book);
-    }
-  }
+  const uniqueBooks = [
+    ...new Map(
+      discoveredBooks.map((book) => [
+        book.product_url,
+        book,
+      ])
+    ).values(),
+  ];
 
 
   return {
     cataloguePages,
-    discovered: discoveredBooks.length,
-    books: [...uniqueMap.values()],
+    discovered:
+      discoveredBooks.length,
+
+    books: uniqueBooks,
   };
 }
 
 
 // ==================================================
-// BOOK DETAIL PARSER
+// PARSE DETAIL PAGE
 // ==================================================
 
 function parseBookPage(
@@ -228,19 +302,17 @@ function parseBookPage(
 ) {
   const $ = cheerio.load(html);
 
+  const productMain =
+    $(".product_main");
 
-  // Product area only
-
-  const productMain = $(".product_main");
-
-
-  // ---------------- TITLE ----------------
 
   const title =
-    productMain.find("h1").first().text().trim();
+    productMain
+      .find("h1")
+      .first()
+      .text()
+      .trim();
 
-
-  // ---------------- PRICE ----------------
 
   const priceText =
     productMain
@@ -249,8 +321,6 @@ function parseBookPage(
       .text()
       .trim();
 
-
-  // ---------------- AVAILABILITY ----------------
 
   const availabilityText =
     productMain
@@ -261,13 +331,12 @@ function parseBookPage(
       .trim();
 
 
-  // ---------------- RATING ----------------
-
-  const ratingElement =
-    productMain.find(".star-rating").first();
-
   const ratingClasses =
-    ratingElement.attr("class") || "";
+    productMain
+      .find(".star-rating")
+      .first()
+      .attr("class") || "";
+
 
   const ratingText =
     ratingClasses
@@ -275,41 +344,41 @@ function parseBookPage(
       .find(
         (className) =>
           className !== "star-rating"
-      ) || null;
+      ) || "";
 
 
   // ---------------- DESCRIPTION ----------------
 
+  let description = null;
+
   const descriptionHeading =
     $("#product_description");
 
-  let description = null;
-
-  if (descriptionHeading.length > 0) {
-    const descriptionParagraph =
+  if (descriptionHeading.length) {
+    const paragraph =
       descriptionHeading.next("p");
 
-    if (descriptionParagraph.length > 0) {
-      const text = descriptionParagraph
+    if (paragraph.length) {
+      const text = paragraph
         .text()
         .replace(/\s+/g, " ")
         .trim();
 
-      description =
-        text.length > 0 ? text : null;
+      if (text) {
+        description = text;
+      }
     }
   }
 
 
-  // ==================================================
   // RAW RECORD
-  // ==================================================
 
   return {
     title,
     product_url: productUrl,
     price_text: priceText,
-    availability_text: availabilityText,
+    availability_text:
+      availabilityText,
     rating_text: ratingText,
     description,
     source_page: sourcePage,
@@ -319,56 +388,225 @@ function parseBookPage(
 
 
 // ==================================================
-// EXTRACT ALL DETAILS
+// NORMALIZE PRICE
 // ==================================================
 
-async function extractBookDetails(books) {
-  const rawRecords = [];
+function normalizePrice(priceText) {
+  if (typeof priceText !== "string") {
+    return NaN;
+  }
 
-  let detailPages = 0;
+  const cleaned = priceText
+    .replace("£", "")
+    .trim();
+
+  return Number(cleaned);
+}
 
 
-  for (let i = 0; i < books.length; i++) {
+// ==================================================
+// NORMALIZE RECORD
+// ==================================================
+
+function normalizeRecord(rawRecord) {
+  return {
+    ...rawRecord,
+
+    price_gbp:
+      normalizePrice(
+        rawRecord.price_text
+      ),
+  };
+}
+
+
+// ==================================================
+// VALIDATE RECORD
+// ==================================================
+
+function validateRecord(record) {
+  const result =
+    BookSchema.safeParse(record);
+
+  if (result.success) {
+    return {
+      success: true,
+      data: result.data,
+    };
+  }
+
+
+  return {
+    success: false,
+
+    error:
+      result.error.issues
+        .map((issue) => {
+          const field =
+            issue.path.join(".");
+
+          return `${field}: ${issue.message}`;
+        })
+        .join("; "),
+  };
+}
+
+
+// ==================================================
+// EXTRACT + VALIDATE ALL BOOKS
+// ==================================================
+
+async function processBooks(books) {
+  const validRecords = [];
+  const errors = [];
+
+
+  for (
+    let i = 0;
+    i < books.length;
+    i++
+  ) {
     const book = books[i];
 
     console.log(
-      `\nBook ${i + 1}/${books.length}`
-    );
-
-    const result = await fetchPage(
-      book.product_url
+      `Book ${i + 1}/${books.length}`
     );
 
 
-    const record = parseBookPage(
-      result.html,
-      book.product_url,
-      book.source_page,
-      result.fetchedAt
-    );
+    try {
+      const result =
+        await fetchPage(
+          book.product_url
+        );
 
 
-    rawRecords.push(record);
+      const rawRecord =
+        parseBookPage(
+          result.html,
+          book.product_url,
+          book.source_page,
+          result.fetchedAt
+        );
 
-    detailPages++;
+
+      const normalizedRecord =
+        normalizeRecord(rawRecord);
 
 
-    // Only wait after a real HTTP request.
-    // Cache hits never leave the computer.
+      const validation =
+        validateRecord(
+          normalizedRecord
+        );
 
-    if (
-      !result.fromCache &&
-      i < books.length - 1
-    ) {
-      await sleep(REQUEST_DELAY_MS);
+
+      if (validation.success) {
+        validRecords.push(
+          validation.data
+        );
+      } else {
+        errors.push({
+          product_url:
+            book.product_url,
+
+          reason:
+            validation.error,
+        });
+      }
+
+
+      if (
+        !result.fromCache &&
+        i < books.length - 1
+      ) {
+        await sleep(
+          REQUEST_DELAY_MS
+        );
+      }
+
+    } catch (error) {
+      errors.push({
+        product_url:
+          book.product_url,
+
+        reason:
+          error.message,
+      });
     }
   }
 
 
   return {
-    rawRecords,
-    detailPages,
+    validRecords,
+    errors,
   };
+}
+
+
+// ==================================================
+// DEDUPLICATE FINAL RECORDS
+// ==================================================
+
+function deduplicateRecords(records) {
+  const recordMap = new Map();
+
+  for (const record of records) {
+    recordMap.set(
+      record.product_url,
+      record
+    );
+  }
+
+  return [...recordMap.values()];
+}
+
+
+// ==================================================
+// WRITE OUTPUT
+// ==================================================
+
+async function writeOutput(
+  validRecords,
+  errors
+) {
+  await fs.mkdir(
+    OUTPUT_DIR,
+    { recursive: true }
+  );
+
+
+  const uniqueRecords =
+    deduplicateRecords(
+      validRecords
+    );
+
+
+  // IMPORTANT:
+  // overwrite instead of append
+  // makes the run idempotent.
+
+  await fs.writeFile(
+    BOOKS_FILE,
+    JSON.stringify(
+      uniqueRecords,
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+
+  await fs.writeFile(
+    ERRORS_FILE,
+    JSON.stringify(
+      errors,
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+
+  return uniqueRecords;
 }
 
 
@@ -377,24 +615,34 @@ async function extractBookDetails(books) {
 // ==================================================
 
 async function main() {
-  console.log("\n📚 The Polite Scraper");
-  console.log("================================");
+  console.log(
+    "\n📚 The Polite Scraper"
+  );
 
   console.log(
-    "Stage 3: Extract raw book records"
+    "================================"
+  );
+
+  console.log(
+    "Stage 4: Normalize, validate and store"
   );
 
 
-  // ==================================================
-  // DISCOVERY
-  // ==================================================
+  // ---------------- DISCOVERY ----------------
 
-  const discovery = await discoverBooks();
+  const discovery =
+    await discoverBooks();
 
 
-  console.log("\n================================");
+  console.log(
+    "\n================================"
+  );
+
   console.log("DISCOVERY");
-  console.log("================================");
+
+  console.log(
+    "================================"
+  );
 
   console.log(
     `catalogue_pages=${discovery.cataloguePages}`
@@ -409,36 +657,109 @@ async function main() {
   );
 
 
-  // ==================================================
-  // DETAIL EXTRACTION
-  // ==================================================
+  // ---------------- PROCESS ----------------
+
+  console.log(
+    "\nProcessing book details...\n"
+  );
+
 
   const {
-    rawRecords,
-    detailPages,
-  } = await extractBookDetails(
+    validRecords,
+    errors,
+  } = await processBooks(
     discovery.books
   );
 
 
+  const storedRecords =
+    await writeOutput(
+      validRecords,
+      errors
+    );
+
+
   // ==================================================
-  // STAGE 3 CHECKPOINT
+  // STAGE 4 CHECKPOINT
   // ==================================================
 
-  console.log("\n================================");
-  console.log("STAGE 3 CHECKPOINT");
-  console.log("================================");
+  console.log(
+    "\n================================"
+  );
 
-  console.log(`detail_pages=${detailPages}`);
+  console.log(
+    "STAGE 4 CHECKPOINT"
+  );
 
-  console.log("\nComplete raw record:\n");
+  console.log(
+    "================================"
+  );
+
+  console.log(
+    `valid_records=${storedRecords.length}`
+  );
+
+  console.log(
+    `invalid_records=${errors.length}`
+  );
+
+  console.log(
+    `books_json_records=${storedRecords.length}`
+  );
+
+
+  const allPricesNumbers =
+    storedRecords.every(
+      (book) =>
+        typeof book.price_gbp ===
+          "number" &&
+        Number.isFinite(
+          book.price_gbp
+        )
+    );
+
+
+  const allHttps =
+    storedRecords.every(
+      (book) =>
+        book.product_url.startsWith(
+          "https://"
+        )
+    );
+
+
+  console.log(
+    `all_prices_numeric=${allPricesNumbers}`
+  );
+
+  console.log(
+    `all_urls_https=${allHttps}`
+  );
+
+
+  console.log(
+    "\nSample normalized record:\n"
+  );
 
   console.log(
     JSON.stringify(
-      rawRecords[0],
+      storedRecords[0],
       null,
       2
     )
+  );
+
+
+  console.log(
+    "\nOutput:"
+  );
+
+  console.log(
+    "output/books.json"
+  );
+
+  console.log(
+    "output/errors.json"
   );
 }
 
