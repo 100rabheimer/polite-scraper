@@ -1,118 +1,430 @@
 const fs = require("fs/promises");
 const path = require("path");
+const cheerio = require("cheerio");
 
-const START_URL = "https://books.toscrape.com/catalogue/page-1.html";
 
-const CACHE_DIR = path.join(__dirname, "..", "cache");
+// ==================================================
+// CONFIG
+// ==================================================
+
+const START_URL =
+  "https://books.toscrape.com/catalogue/page-1.html";
+
+const CACHE_DIR = path.join(
+  __dirname,
+  "..",
+  "cache"
+);
 
 const USER_AGENT =
-  "PoliteScraper/1.0 (learning project; contact: student developer)";
+  "PoliteScraper/1.0 (educational project)";
 
 const REQUEST_TIMEOUT_MS = 10000;
 const REQUEST_DELAY_MS = 500;
 
+const MAX_CATALOGUE_PAGES = 3;
 
-// --------------------------------------------------
-// WAIT BETWEEN REAL NETWORK REQUESTS
-// --------------------------------------------------
+
+// ==================================================
+// SLEEP
+// ==================================================
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 
-// --------------------------------------------------
-// CREATE CACHE FILE NAME
-// --------------------------------------------------
+// ==================================================
+// CACHE FILE PATH
+// ==================================================
 
 function getCachePath(url) {
+
   const parsedUrl = new URL(url);
 
-  const safeName = parsedUrl.pathname
+  let safeName = parsedUrl.pathname
     .replace(/^\/+/, "")
     .replace(/[\/\\]/g, "_");
 
-  return path.join(CACHE_DIR, `${safeName}.html`);
+  if (!safeName) {
+    safeName = "index";
+  }
+
+  return path.join(
+    CACHE_DIR,
+    `${safeName}.html`
+  );
 }
 
 
-// --------------------------------------------------
-// FETCH PAGE WITH CACHE
-// --------------------------------------------------
+// ==================================================
+// FETCH PAGE
+// ==================================================
 
 async function fetchPage(url) {
-  await fs.mkdir(CACHE_DIR, { recursive: true });
+
+  await fs.mkdir(
+    CACHE_DIR,
+    { recursive: true }
+  );
 
   const cachePath = getCachePath(url);
 
-  // Try cache first
-  try {
-    const cachedHtml = await fs.readFile(cachePath, "utf8");
 
-    console.log(`[CACHE HIT] ${url}`);
+  // ----------------------------------------------
+  // CHECK CACHE FIRST
+  // ----------------------------------------------
+
+  try {
+
+    const cachedHtml =
+      await fs.readFile(
+        cachePath,
+        "utf8"
+      );
+
+    console.log(
+      `[CACHE HIT] ${url}`
+    );
 
     return cachedHtml;
+
   } catch {
-    // File does not exist -> fetch from network
+
+    // Cache does not exist.
+    // Continue with real HTTP request.
+
   }
 
-  console.log(`[FETCH] ${url}`);
 
-  const controller = new AbortController();
+  // ----------------------------------------------
+  // REAL NETWORK REQUEST
+  // ----------------------------------------------
 
-  const timeout = setTimeout(() => {
-    controller.abort();
-  }, REQUEST_TIMEOUT_MS);
+  console.log(
+    `[FETCH] ${url}`
+  );
+
+  const controller =
+    new AbortController();
+
+  const timeout = setTimeout(
+    () => controller.abort(),
+    REQUEST_TIMEOUT_MS
+  );
+
 
   try {
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": USER_AGENT,
-      },
-      signal: controller.signal,
-    });
+
+    const response = await fetch(
+      url,
+      {
+        headers: {
+          "User-Agent": USER_AGENT,
+        },
+
+        signal: controller.signal,
+      }
+    );
+
+
+    // ------------------------------------------
+    // STATUS CHECK
+    // ------------------------------------------
 
     if (!response.ok) {
+
       throw new Error(
         `HTTP ${response.status} ${response.statusText}`
       );
+
     }
 
-    const html = await response.text();
 
-    await fs.writeFile(cachePath, html, "utf8");
+    const html =
+      await response.text();
 
-    console.log(`[CACHED] ${cachePath}`);
+
+    // ------------------------------------------
+    // SAVE RESPONSE TO CACHE
+    // ------------------------------------------
+
+    await fs.writeFile(
+      cachePath,
+      html,
+      "utf8"
+    );
+
+
+    console.log(
+      `[CACHED] ${cachePath}`
+    );
+
 
     return html;
 
   } finally {
+
     clearTimeout(timeout);
+
   }
 }
 
 
-// --------------------------------------------------
-// MAIN
-// --------------------------------------------------
+// ==================================================
+// PARSE CATALOGUE PAGE
+// ==================================================
 
-async function main() {
-  console.log("\n📚 Polite Scraper");
-  console.log("------------------------------");
+function parseCatalogue(
+  html,
+  pageUrl
+) {
 
-  const html = await fetchPage(START_URL);
+  const $ = cheerio.load(html);
 
-  console.log(`HTML characters: ${html.length}`);
+  const bookUrls = [];
 
-  // Delay only represents politeness around real requests.
-  // Stage 2 will manage delays between multiple network requests.
-  await sleep(REQUEST_DELAY_MS);
 
-  console.log("Stage 1 complete.");
+  // ----------------------------------------------
+  // FIND BOOK LINKS
+  // ----------------------------------------------
+
+  $(
+    "article.product_pod h3 a"
+  ).each(
+    (_, element) => {
+
+      const href =
+        $(element).attr("href");
+
+
+      if (!href) {
+        return;
+      }
+
+
+      // IMPORTANT:
+      // Never concatenate URL strings manually.
+      // Let the URL class resolve relative URLs.
+
+      const absoluteUrl =
+        new URL(
+          href,
+          pageUrl
+        ).href;
+
+
+      bookUrls.push(
+        absoluteUrl
+      );
+
+    }
+  );
+
+
+  // ----------------------------------------------
+  // FIND NEXT PAGE
+  // ----------------------------------------------
+
+  const nextHref =
+    $("li.next a").attr("href");
+
+
+  const nextUrl =
+    nextHref
+      ? new URL(
+          nextHref,
+          pageUrl
+        ).href
+      : null;
+
+
+  return {
+    bookUrls,
+    nextUrl,
+  };
 }
 
 
-main().catch((error) => {
-  console.error("Scraper failed:", error.message);
-  process.exitCode = 1;
-});
+// ==================================================
+// MAIN
+// ==================================================
+
+async function main() {
+
+  console.log(
+    "\n📚 The Polite Scraper"
+  );
+
+  console.log(
+    "================================"
+  );
+
+  console.log(
+    "Stage 2: Discover catalogue pages"
+  );
+
+
+  let currentPageUrl =
+    START_URL;
+
+  let cataloguePages = 0;
+
+  const discoveredUrls = [];
+
+
+  // ----------------------------------------------
+  // FOLLOW FIRST THREE CATALOGUE PAGES
+  // ----------------------------------------------
+
+  while (
+    currentPageUrl &&
+    cataloguePages <
+      MAX_CATALOGUE_PAGES
+  ) {
+
+    console.log(
+      `\nCatalogue page ${
+        cataloguePages + 1
+      }`
+    );
+
+
+    // ------------------------------------------
+    // FETCH / READ CACHE
+    // ------------------------------------------
+
+    const html =
+      await fetchPage(
+        currentPageUrl
+      );
+
+
+    // ------------------------------------------
+    // PARSE PAGE
+    // ------------------------------------------
+
+    const {
+      bookUrls,
+      nextUrl,
+    } = parseCatalogue(
+      html,
+      currentPageUrl
+    );
+
+
+    cataloguePages++;
+
+
+    // ------------------------------------------
+    // COLLECT DISCOVERED BOOKS
+    // ------------------------------------------
+
+    discoveredUrls.push(
+      ...bookUrls
+    );
+
+
+    console.log(
+      `books_found=${bookUrls.length}`
+    );
+
+
+    // Follow site's own Next link.
+
+    currentPageUrl =
+      nextUrl;
+
+
+    // ------------------------------------------
+    // POLITE DELAY
+    // ------------------------------------------
+
+    if (
+      currentPageUrl &&
+      cataloguePages <
+        MAX_CATALOGUE_PAGES
+    ) {
+
+      await sleep(
+        REQUEST_DELAY_MS
+      );
+
+    }
+
+  }
+
+
+  // ==================================================
+  // REMOVE DUPLICATES
+  // ==================================================
+
+  const uniqueUrls = [
+    ...new Set(
+      discoveredUrls
+    ),
+  ];
+
+
+  // ==================================================
+  // CHECKPOINT
+  // ==================================================
+
+  console.log(
+    "\n================================"
+  );
+
+  console.log(
+    "STAGE 2 CHECKPOINT"
+  );
+
+  console.log(
+    "================================"
+  );
+
+  console.log(
+    `catalogue_pages=${cataloguePages}`
+  );
+
+  console.log(
+    `discovered=${discoveredUrls.length}`
+  );
+
+  console.log(
+    `unique_urls=${uniqueUrls.length}`
+  );
+
+
+  // ----------------------------------------------
+  // OPTIONAL SAMPLE
+  // ----------------------------------------------
+
+  console.log(
+    "\nFirst discovered book:"
+  );
+
+  console.log(
+    uniqueUrls[0]
+  );
+
+}
+
+
+// ==================================================
+// START SCRAPER
+// ==================================================
+
+main().catch(
+  (error) => {
+
+    console.error(
+      "\nScraper failed:",
+      error.message
+    );
+
+    process.exitCode = 1;
+
+  }
+);
