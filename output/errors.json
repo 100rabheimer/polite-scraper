@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "type": "page_failure",
+    "product_url": "https://books.toscrape.com/catalogue/this-book-does-not-exist-stage5-test/index.html",
+    "reason": "HTTP 404"
+  }
+]
