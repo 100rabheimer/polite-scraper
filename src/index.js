@@ -28,7 +28,7 @@ const REPORT_FILE = path.join(OUTPUT_DIR, "run-report.json");
 // Stage 5 failure test.
 // Keep true while proving failure handling.
 // Change to false after the checkpoint is verified.
-const TEST_FAILURE = true;
+const TEST_FAILURE = false;
 
 const FAKE_BOOK_URL =
     "https://books.toscrape.com/catalogue/this-book-does-not-exist-stage5-test/index.html";

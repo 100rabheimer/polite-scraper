@@ -1,3 +1,22 @@
+# Dependencies
 node_modules/
+
+# Environment files
 .env
+.env.*
+
+# Keep example env files
+!.env.example
+
+# Scraper cache
 cache/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
