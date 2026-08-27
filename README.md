@@ -994,8 +994,6 @@ Backend Development • Node.js • APIs • Data Engineering
 
 **Discover → Fetch → Cache → Extract → Normalize → Validate → Report**
 
-### Assignment Completed ✅
-
 **60 Unique Books • Cache-First • Validated JSON • Failure-Safe Scraping**
 
 </div>
